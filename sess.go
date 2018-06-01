@@ -60,8 +60,6 @@ type (
 		// recvbuf turns packets into stream
 		recvbuf []byte
 		bufptr  []byte
-		// extended output buffer(with header)
-		ext []byte
 
 		// settings
 		remote     net.Addr  // remote peer address
