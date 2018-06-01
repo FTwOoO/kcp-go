@@ -1,7 +1,6 @@
 package kcp
 
 import (
-	"crypto/sha1"
 	"fmt"
 	"io"
 	"log"
@@ -11,19 +10,12 @@ import (
 	"sync"
 	"testing"
 	"time"
-
-	"golang.org/x/crypto/pbkdf2"
 )
 
 const portEcho = "127.0.0.1:9999"
 const portSink = "127.0.0.1:19999"
 const portTinyBufferEcho = "127.0.0.1:29999"
 const portListerner = "127.0.0.1:9998"
-const salt = "kcptest"
-
-var key = []byte("testkey")
-var fec = 4
-var pass = pbkdf2.Key(key, []byte(portSink), 4096, 32, sha1.New)
 
 func init() {
 	go func() {
@@ -37,7 +29,7 @@ func init() {
 }
 
 func dialEcho() (*UDPSession, error) {
-	sess, err := DialWithOptions(portEcho, 10, 3)
+	sess, err := DialWithOptions(portEcho)
 	if err != nil {
 		panic(err)
 	}
@@ -59,7 +51,7 @@ func dialEcho() (*UDPSession, error) {
 }
 
 func dialSink() (*UDPSession, error) {
-	sess, err := DialWithOptions(portSink, 0, 0)
+	sess, err := DialWithOptions(portSink)
 	if err != nil {
 		panic(err)
 	}
@@ -77,7 +69,7 @@ func dialSink() (*UDPSession, error) {
 }
 
 func dialTinyBufferEcho() (*UDPSession, error) {
-	sess, err := DialWithOptions(portTinyBufferEcho, 10, 3)
+	sess, err := DialWithOptions(portTinyBufferEcho)
 	if err != nil {
 		panic(err)
 	}
@@ -86,14 +78,14 @@ func dialTinyBufferEcho() (*UDPSession, error) {
 
 //////////////////////////
 func listenEcho() (net.Listener, error) {
-	return ListenWithOptions(portEcho, 10, 3)
+	return ListenWithOptions(portEcho)
 }
 func listenTinyBufferEcho() (net.Listener, error) {
-	return ListenWithOptions(portTinyBufferEcho, 10, 3)
+	return ListenWithOptions(portTinyBufferEcho)
 }
 
 func listenSink() (net.Listener, error) {
-	return ListenWithOptions(portSink, 0, 0)
+	return ListenWithOptions(portSink)
 }
 
 func echoServer() {
@@ -436,7 +428,7 @@ func TestSNMP(t *testing.T) {
 }
 
 func TestListenerClose(t *testing.T) {
-	l, err := ListenWithOptions(portListerner, 10, 3)
+	l, err := ListenWithOptions(portListerner)
 	if err != nil {
 		t.Fail()
 	}

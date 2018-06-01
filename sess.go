@@ -66,10 +66,6 @@ type (
 		// extended output buffer(with header)
 		ext []byte
 
-		// FEC
-		fecDecoder *fecDecoder
-		fecEncoder *fecEncoder
-
 		// settings
 		remote     net.Addr  // remote peer address
 		rd         time.Time // read deadline
@@ -85,9 +81,6 @@ type (
 		chWriteEvent chan struct{} // notify Write() can be called without blocking
 		chErrorEvent chan error    // notify Read() have an error
 
-		// nonce generator
-		nonce nonceMD5
-
 		isClosed bool // flag the session has Closed
 		mu       sync.Mutex
 	}
@@ -102,7 +95,7 @@ type (
 )
 
 // newUDPSession create a new udp session for client or server
-func newUDPSession(conv uint32, dataShards, parityShards int, l *Listener, conn net.PacketConn, remote net.Addr) *UDPSession {
+func newUDPSession(conv uint32, l *Listener, conn net.PacketConn, remote net.Addr) *UDPSession {
 	sess := new(UDPSession)
 	sess.die = make(chan struct{})
 	sess.chReadEvent = make(chan struct{}, 1)
@@ -112,14 +105,6 @@ func newUDPSession(conv uint32, dataShards, parityShards int, l *Listener, conn 
 	sess.conn = conn
 	sess.l = l
 	sess.recvbuf = make([]byte, mtuLimit)
-
-	// FEC initialization
-	sess.fecDecoder = newFECDecoder(rxFECMulti*(dataShards+parityShards), dataShards, parityShards)
-	sess.fecEncoder = newFECEncoder(dataShards, parityShards, 0)
-
-	if sess.fecEncoder != nil {
-		sess.headerSize += fecHeaderSizePlus2
-	}
 
 	// only allocate extended packet buffer
 	// when the extra header is required
@@ -453,11 +438,6 @@ func (s *UDPSession) output(buf []byte) {
 		copy(ext[s.headerSize:], buf)
 	}
 
-	// 1. FEC encoding
-	if s.fecEncoder != nil {
-		ecc = s.fecEncoder.encode(ext)
-	}
-
 	// 4. WriteTo kernel
 	nbytes := 0
 	npkts := 0
@@ -510,55 +490,15 @@ func (s *UDPSession) notifyWriteEvent() {
 func (s *UDPSession) kcpInput(data []byte) {
 	var kcpInErrors, fecErrs, fecRecovered, fecParityShards uint64
 
-	if s.fecDecoder != nil {
-		f := s.fecDecoder.decodeBytes(data)
-		s.mu.Lock()
-		if f.flag == typeData {
-			if ret := s.kcp.Input(data[fecHeaderSizePlus2:], true, s.ackNoDelay); ret != 0 {
-				kcpInErrors++
-			}
-		}
-
-		if f.flag == typeData || f.flag == typeFEC {
-			if f.flag == typeFEC {
-				fecParityShards++
-			}
-
-			recovers := s.fecDecoder.decode(f)
-			for _, r := range recovers {
-				if len(r) >= 2 { // must be larger than 2bytes
-					sz := binary.LittleEndian.Uint16(r)
-					if int(sz) <= len(r) && sz >= 2 {
-						if ret := s.kcp.Input(r[2:sz], false, s.ackNoDelay); ret == 0 {
-							fecRecovered++
-						} else {
-							kcpInErrors++
-						}
-					} else {
-						fecErrs++
-					}
-				} else {
-					fecErrs++
-				}
-			}
-		}
-
-		// notify reader
-		if n := s.kcp.PeekSize(); n > 0 {
-			s.notifyReadEvent()
-		}
-		s.mu.Unlock()
-	} else {
-		s.mu.Lock()
-		if ret := s.kcp.Input(data, true, s.ackNoDelay); ret != 0 {
-			kcpInErrors++
-		}
-		// notify reader
-		if n := s.kcp.PeekSize(); n > 0 {
-			s.notifyReadEvent()
-		}
-		s.mu.Unlock()
+	s.mu.Lock()
+	if ret := s.kcp.Input(data, true, s.ackNoDelay); ret != 0 {
+		kcpInErrors++
 	}
+	// notify reader
+	if n := s.kcp.PeekSize(); n > 0 {
+		s.notifyReadEvent()
+	}
+	s.mu.Unlock()
 
 	atomic.AddUint64(&DefaultSnmp.InPkts, 1)
 	atomic.AddUint64(&DefaultSnmp.InBytes, uint64(len(data)))
@@ -619,10 +559,7 @@ type (
 
 	// Listener defines a server listening for connections
 	Listener struct {
-		dataShards   int            // FEC data shard
-		parityShards int            // FEC parity shard
-		fecDecoder   *fecDecoder    // FEC mock initialization
-		conn         net.PacketConn // the underlying packet connection
+		conn net.PacketConn // the underlying packet connection
 
 		sessions        map[sessionKey]*UDPSession // all sessions accepted by this Listener
 		chAccepts       chan *UDPSession           // Listen() backlog
@@ -656,45 +593,33 @@ func (l *Listener) monitor() {
 			from := p.from
 
 			var conv uint32
-			convValid := false
-			if l.fecDecoder != nil {
-				isfec := binary.LittleEndian.Uint16(data[4:])
-				if isfec == typeData {
-					conv = binary.LittleEndian.Uint32(data[fecHeaderSizePlus2:])
-					convValid = true
-				}
-			} else {
-				conv = binary.LittleEndian.Uint32(data)
-				convValid = true
+			conv = binary.LittleEndian.Uint32(data)
+
+			key := sessionKey{
+				addr:   from.String(),
+				convID: conv,
+			}
+			var s *UDPSession
+			var ok bool
+
+			// packets received from an address always come in batch.
+			// cache the session for next packet, without querying map.
+			if key == lastKey {
+				s, ok = lastSession, true
+			} else if s, ok = l.sessions[key]; ok {
+				lastSession = s
+				lastKey = key
 			}
 
-			if convValid {
-				key := sessionKey{
-					addr:   from.String(),
-					convID: conv,
+			if !ok { // new session
+				if !blacklist.has(from.String(), conv) && len(l.chAccepts) < cap(l.chAccepts) && len(l.sessions) < 4096 { // do not let new session overwhelm accept queue and connection count
+					ses := newUDPSession(conv, l, l.conn, from)
+					ses.kcpInput(data)
+					l.sessions[key] = ses
+					l.chAccepts <- ses
 				}
-				var s *UDPSession
-				var ok bool
-
-				// packets received from an address always come in batch.
-				// cache the session for next packet, without querying map.
-				if key == lastKey {
-					s, ok = lastSession, true
-				} else if s, ok = l.sessions[key]; ok {
-					lastSession = s
-					lastKey = key
-				}
-
-				if !ok { // new session
-					if !blacklist.has(from.String(), conv) && len(l.chAccepts) < cap(l.chAccepts) && len(l.sessions) < 4096 { // do not let new session overwhelm accept queue and connection count
-						ses := newUDPSession(conv, l.dataShards, l.parityShards, l, l.conn, from)
-						ses.kcpInput(data)
-						l.sessions[key] = ses
-						l.chAccepts <- ses
-					}
-				} else {
-					s.kcpInput(data)
-				}
+			} else {
+				s.kcpInput(data)
 			}
 
 			xmitBuf.Put(raw)
@@ -811,11 +736,11 @@ func (l *Listener) closeSession(key sessionKey) bool {
 func (l *Listener) Addr() net.Addr { return l.conn.LocalAddr() }
 
 // Listen listens for incoming KCP packets addressed to the local address laddr on the network "udp",
-func Listen(laddr string) (net.Listener, error) { return ListenWithOptions(laddr, 0, 0) }
+func Listen(laddr string) (net.Listener, error) { return ListenWithOptions(laddr) }
 
 // ListenWithOptions listens for incoming KCP packets addressed to the local address laddr on the network "udp" with packet encryption,
 // dataShards, parityShards defines Reed-Solomon Erasure Coding parameters
-func ListenWithOptions(laddr string, dataShards, parityShards int) (*Listener, error) {
+func ListenWithOptions(laddr string) (*Listener, error) {
 	udpaddr, err := net.ResolveUDPAddr("udp", laddr)
 	if err != nil {
 		return nil, errors.Wrap(err, "net.ResolveUDPAddr")
@@ -825,34 +750,27 @@ func ListenWithOptions(laddr string, dataShards, parityShards int) (*Listener, e
 		return nil, errors.Wrap(err, "net.ListenUDP")
 	}
 
-	return ServeConn(dataShards, parityShards, conn)
+	return ServeConn(conn)
 }
 
 // ServeConn serves KCP protocol for a single packet connection.
-func ServeConn(dataShards, parityShards int, conn net.PacketConn) (*Listener, error) {
+func ServeConn(conn net.PacketConn) (*Listener, error) {
 	l := new(Listener)
 	l.conn = conn
 	l.sessions = make(map[sessionKey]*UDPSession)
 	l.chAccepts = make(chan *UDPSession, acceptBacklog)
 	l.chSessionClosed = make(chan sessionKey)
 	l.die = make(chan struct{})
-	l.dataShards = dataShards
-	l.parityShards = parityShards
-	l.fecDecoder = newFECDecoder(rxFECMulti*(dataShards+parityShards), dataShards, parityShards)
-
-	if l.fecDecoder != nil {
-		l.headerSize += fecHeaderSizePlus2
-	}
 
 	go l.monitor()
 	return l, nil
 }
 
 // Dial connects to the remote address "raddr" on the network "udp"
-func Dial(raddr string) (net.Conn, error) { return DialWithOptions(raddr, 0, 0) }
+func Dial(raddr string) (net.Conn, error) { return DialWithOptions(raddr) }
 
 // DialWithOptions connects to the remote address "raddr" on the network "udp" with packet encryption
-func DialWithOptions(raddr string, dataShards, parityShards int) (*UDPSession, error) {
+func DialWithOptions(raddr string) (*UDPSession, error) {
 	udpaddr, err := net.ResolveUDPAddr("udp", raddr)
 	if err != nil {
 		return nil, errors.Wrap(err, "net.ResolveUDPAddr")
@@ -863,11 +781,11 @@ func DialWithOptions(raddr string, dataShards, parityShards int) (*UDPSession, e
 		return nil, errors.Wrap(err, "net.DialUDP")
 	}
 
-	return NewConn(raddr, dataShards, parityShards, &connectedUDPConn{udpconn})
+	return NewConn(raddr, &connectedUDPConn{udpconn})
 }
 
 // NewConn establishes a session and talks KCP protocol over a packet connection.
-func NewConn(raddr string, dataShards, parityShards int, conn net.PacketConn) (*UDPSession, error) {
+func NewConn(raddr string, conn net.PacketConn) (*UDPSession, error) {
 	udpaddr, err := net.ResolveUDPAddr("udp", raddr)
 	if err != nil {
 		return nil, errors.Wrap(err, "net.ResolveUDPAddr")
@@ -875,7 +793,7 @@ func NewConn(raddr string, dataShards, parityShards int, conn net.PacketConn) (*
 
 	var convid uint32
 	binary.Read(rand.Reader, binary.LittleEndian, &convid)
-	return newUDPSession(convid, dataShards, parityShards, nil, conn, udpaddr), nil
+	return newUDPSession(convid, nil, conn, udpaddr), nil
 }
 
 // returns current time in milliseconds
