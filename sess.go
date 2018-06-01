@@ -7,9 +7,9 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"github.com/pkg/errors"
+	"errors"
 	"golang.org/x/net/ipv4"
+	"fmt"
 )
 
 type errTimeout struct {
@@ -735,19 +735,16 @@ func (l *Listener) closeSession(key sessionKey) bool {
 // Addr returns the listener's network address, The Addr returned is shared by all invocations of Addr, so do not modify it.
 func (l *Listener) Addr() net.Addr { return l.conn.LocalAddr() }
 
-// Listen listens for incoming KCP packets addressed to the local address laddr on the network "udp",
-func Listen(laddr string) (net.Listener, error) { return ListenWithOptions(laddr) }
-
 // ListenWithOptions listens for incoming KCP packets addressed to the local address laddr on the network "udp" with packet encryption,
 // dataShards, parityShards defines Reed-Solomon Erasure Coding parameters
 func ListenWithOptions(laddr string) (*Listener, error) {
 	udpaddr, err := net.ResolveUDPAddr("udp", laddr)
 	if err != nil {
-		return nil, errors.Wrap(err, "net.ResolveUDPAddr")
+		return nil, fmt.Errorf("net.ResolveUDPAddr:%v", err)
 	}
 	conn, err := net.ListenUDP("udp", udpaddr)
 	if err != nil {
-		return nil, errors.Wrap(err, "net.ListenUDP")
+		return nil, fmt.Errorf("net.ListenUDP:%v", err)
 	}
 
 	return ServeConn(conn)
@@ -766,19 +763,16 @@ func ServeConn(conn net.PacketConn) (*Listener, error) {
 	return l, nil
 }
 
-// Dial connects to the remote address "raddr" on the network "udp"
-func Dial(raddr string) (net.Conn, error) { return DialWithOptions(raddr) }
-
 // DialWithOptions connects to the remote address "raddr" on the network "udp" with packet encryption
 func DialWithOptions(raddr string) (*UDPSession, error) {
 	udpaddr, err := net.ResolveUDPAddr("udp", raddr)
 	if err != nil {
-		return nil, errors.Wrap(err, "net.ResolveUDPAddr")
+		return nil, fmt.Errorf("net.ResolveUDPAddr:%v", err)
 	}
 
 	udpconn, err := net.DialUDP("udp", nil, udpaddr)
 	if err != nil {
-		return nil, errors.Wrap(err, "net.DialUDP")
+		return nil, fmt.Errorf("net.DialUDP:%v", err)
 	}
 
 	return NewConn(raddr, &connectedUDPConn{udpconn})
@@ -788,7 +782,7 @@ func DialWithOptions(raddr string) (*UDPSession, error) {
 func NewConn(raddr string, conn net.PacketConn) (*UDPSession, error) {
 	udpaddr, err := net.ResolveUDPAddr("udp", raddr)
 	if err != nil {
-		return nil, errors.Wrap(err, "net.ResolveUDPAddr")
+		return nil, fmt.Errorf("net.ResolveUDPAddr:%v", err)
 	}
 
 	var convid uint32
