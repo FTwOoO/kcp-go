@@ -24,9 +24,6 @@ const (
 	// maximum packet size
 	mtuLimit = 1500
 
-	// FEC keeps rxFECMulti* (dataShard+parityShard) ordered packets in memory
-	rxFECMulti = 3
-
 	// accept backlog
 	acceptBacklog = 128
 
@@ -388,8 +385,8 @@ func (s *UDPSession) SetDSCP(dscp int) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.l == nil {
-		if nc, ok := s.conn.(*connectedUDPConn); ok {
-			return ipv4.NewConn(nc.UDPConn).SetTOS(dscp << 2)
+		if nc, ok := s.conn.(*net.UDPConn); ok {
+			return ipv4.NewConn(nc).SetTOS(dscp << 2)
 		} else if nc, ok := s.conn.(net.Conn); ok {
 			return ipv4.NewConn(nc).SetTOS(dscp << 2)
 		}
@@ -429,7 +426,6 @@ func (s *UDPSession) SetWriteBuffer(bytes int) error {
 // 3. Encryption
 // 4. WriteTo kernel
 func (s *UDPSession) output(buf []byte) {
-	var ecc [][]byte
 
 	// 0. extend buf's header space(if necessary)
 	ext := buf
@@ -448,12 +444,7 @@ func (s *UDPSession) output(buf []byte) {
 		}
 	}
 
-	for k := range ecc {
-		if n, err := s.conn.WriteTo(ecc[k], s.remote); err == nil {
-			nbytes += n
-			npkts++
-		}
-	}
+
 	atomic.AddUint64(&DefaultSnmp.OutPkts, uint64(npkts))
 	atomic.AddUint64(&DefaultSnmp.OutBytes, uint64(nbytes))
 }
@@ -735,9 +726,9 @@ func (l *Listener) closeSession(key sessionKey) bool {
 // Addr returns the listener's network address, The Addr returned is shared by all invocations of Addr, so do not modify it.
 func (l *Listener) Addr() net.Addr { return l.conn.LocalAddr() }
 
-// ListenWithOptions listens for incoming KCP packets addressed to the local address laddr on the network "udp" with packet encryption,
+// Listen listens for incoming KCP packets addressed to the local address laddr on the network "udp" with packet encryption,
 // dataShards, parityShards defines Reed-Solomon Erasure Coding parameters
-func ListenWithOptions(laddr string) (*Listener, error) {
+func Listen(laddr string) (*Listener, error) {
 	udpaddr, err := net.ResolveUDPAddr("udp", laddr)
 	if err != nil {
 		return nil, fmt.Errorf("net.ResolveUDPAddr:%v", err)
@@ -763,8 +754,8 @@ func ServeConn(conn net.PacketConn) (*Listener, error) {
 	return l, nil
 }
 
-// DialWithOptions connects to the remote address "raddr" on the network "udp" with packet encryption
-func DialWithOptions(raddr string) (*UDPSession, error) {
+// Dial connects to the remote address "raddr" on the network "udp" with packet encryption
+func Dial(raddr string) (*UDPSession, error) {
 	udpaddr, err := net.ResolveUDPAddr("udp", raddr)
 	if err != nil {
 		return nil, fmt.Errorf("net.ResolveUDPAddr:%v", err)
@@ -775,7 +766,7 @@ func DialWithOptions(raddr string) (*UDPSession, error) {
 		return nil, fmt.Errorf("net.DialUDP:%v", err)
 	}
 
-	return NewConn(raddr, &connectedUDPConn{udpconn})
+	return NewConn(raddr, udpconn)
 }
 
 // NewConn establishes a session and talks KCP protocol over a packet connection.
@@ -792,11 +783,3 @@ func NewConn(raddr string, conn net.PacketConn) (*UDPSession, error) {
 
 // returns current time in milliseconds
 func currentMs() uint32 { return uint32(time.Now().UnixNano() / int64(time.Millisecond)) }
-
-// connectedUDPConn is a wrapper for net.UDPConn which converts WriteTo syscalls
-// to Write syscalls that are 4 times faster on some OS'es. This should only be
-// used for connections that were produced by a net.Dial* call.
-type connectedUDPConn struct{ *net.UDPConn }
-
-// WriteTo redirects all writes to the Write syscall, which is 4 times faster.
-func (c *connectedUDPConn) WriteTo(b []byte, addr net.Addr) (int, error) { return c.Write(b) }

@@ -29,7 +29,7 @@ func init() {
 }
 
 func dialEcho() (*UDPSession, error) {
-	sess, err := DialWithOptions(portEcho)
+	sess, err := Dial(portEcho)
 	if err != nil {
 		panic(err)
 	}
@@ -51,7 +51,7 @@ func dialEcho() (*UDPSession, error) {
 }
 
 func dialSink() (*UDPSession, error) {
-	sess, err := DialWithOptions(portSink)
+	sess, err := Dial(portSink)
 	if err != nil {
 		panic(err)
 	}
@@ -69,7 +69,7 @@ func dialSink() (*UDPSession, error) {
 }
 
 func dialTinyBufferEcho() (*UDPSession, error) {
-	sess, err := DialWithOptions(portTinyBufferEcho)
+	sess, err := Dial(portTinyBufferEcho)
 	if err != nil {
 		panic(err)
 	}
@@ -78,14 +78,14 @@ func dialTinyBufferEcho() (*UDPSession, error) {
 
 //////////////////////////
 func listenEcho() (net.Listener, error) {
-	return ListenWithOptions(portEcho)
+	return Listen(portEcho)
 }
 func listenTinyBufferEcho() (net.Listener, error) {
-	return ListenWithOptions(portTinyBufferEcho)
+	return Listen(portTinyBufferEcho)
 }
 
 func listenSink() (net.Listener, error) {
-	return ListenWithOptions(portSink)
+	return Listen(portSink)
 }
 
 func echoServer() {
@@ -428,7 +428,7 @@ func TestSNMP(t *testing.T) {
 }
 
 func TestListenerClose(t *testing.T) {
-	l, err := ListenWithOptions(portListerner)
+	l, err := Listen(portListerner)
 	if err != nil {
 		t.Fail()
 	}
