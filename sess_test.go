@@ -98,7 +98,6 @@ func echoServer() {
 		kcplistener := l.(*Listener)
 		kcplistener.SetReadBuffer(4 * 1024 * 1024)
 		kcplistener.SetWriteBuffer(4 * 1024 * 1024)
-		kcplistener.SetDSCP(46)
 		for {
 			s, err := l.Accept()
 			if err != nil {
@@ -123,7 +122,6 @@ func sinkServer() {
 		kcplistener := l.(*Listener)
 		kcplistener.SetReadBuffer(4 * 1024 * 1024)
 		kcplistener.SetWriteBuffer(4 * 1024 * 1024)
-		kcplistener.SetDSCP(46)
 		for {
 			s, err := l.Accept()
 			if err != nil {
@@ -158,7 +156,6 @@ func handleEcho(conn *UDPSession) {
 	conn.SetStreamMode(true)
 	conn.SetWindowSize(4096, 4096)
 	conn.SetNoDelay(1, 10, 2, 1)
-	conn.SetDSCP(46)
 	conn.SetMtu(1400)
 	conn.SetACKNoDelay(false)
 	conn.SetReadDeadline(time.Now().Add(time.Hour))
@@ -177,7 +174,6 @@ func handleSink(conn *UDPSession) {
 	conn.SetStreamMode(true)
 	conn.SetWindowSize(4096, 4096)
 	conn.SetNoDelay(1, 10, 2, 1)
-	conn.SetDSCP(46)
 	conn.SetMtu(1400)
 	conn.SetACKNoDelay(false)
 	conn.SetReadDeadline(time.Now().Add(time.Hour))

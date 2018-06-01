@@ -8,7 +8,6 @@ import (
 	"sync/atomic"
 	"time"
 	"errors"
-	"golang.org/x/net/ipv4"
 	"fmt"
 )
 
@@ -371,20 +370,6 @@ func (s *UDPSession) SetNoDelay(nodelay, interval, resend, nc int) {
 	s.kcp.NoDelay(nodelay, interval, resend, nc)
 }
 
-// SetDSCP sets the 6bit DSCP field of IP header, no effect if it's accepted from Listener
-func (s *UDPSession) SetDSCP(dscp int) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.l == nil {
-		if nc, ok := s.conn.(*net.UDPConn); ok {
-			return ipv4.NewConn(nc).SetTOS(dscp << 2)
-		} else if nc, ok := s.conn.(net.Conn); ok {
-			return ipv4.NewConn(nc).SetTOS(dscp << 2)
-		}
-	}
-	return errors.New(errInvalidOperation)
-}
-
 // SetReadBuffer sets the socket read buffer, no effect if it's accepted from Listener
 func (s *UDPSession) SetReadBuffer(bytes int) error {
 	s.mu.Lock()
@@ -423,7 +408,6 @@ func (s *UDPSession) output(buf []byte) {
 			npkts++
 		}
 	}
-
 
 	atomic.AddUint64(&DefaultSnmp.OutPkts, uint64(npkts))
 	atomic.AddUint64(&DefaultSnmp.OutBytes, uint64(nbytes))
@@ -634,14 +618,6 @@ func (l *Listener) SetReadBuffer(bytes int) error {
 func (l *Listener) SetWriteBuffer(bytes int) error {
 	if nc, ok := l.conn.(setWriteBuffer); ok {
 		return nc.SetWriteBuffer(bytes)
-	}
-	return errors.New(errInvalidOperation)
-}
-
-// SetDSCP sets the 6bit DSCP field of IP header
-func (l *Listener) SetDSCP(dscp int) error {
-	if nc, ok := l.conn.(net.Conn); ok {
-		return ipv4.NewConn(nc).SetTOS(dscp << 2)
 	}
 	return errors.New(errInvalidOperation)
 }
