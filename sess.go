@@ -3,7 +3,6 @@ package kcp
 import (
 	"crypto/rand"
 	"encoding/binary"
-	"hash/crc32"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -22,15 +21,6 @@ func (errTimeout) Temporary() bool { return true }
 func (errTimeout) Error() string   { return "i/o timeout" }
 
 const (
-	// 16-bytes magic number for each packet
-	nonceSize = 16
-
-	// 4-bytes packet checksum
-	crcSize = 4
-
-	// overall crypto header size
-	cryptHeaderSize = nonceSize + crcSize
-
 	// maximum packet size
 	mtuLimit = 1500
 
@@ -68,7 +58,6 @@ type (
 		conn       net.PacketConn // the underlying packet connection
 		kcp        *KCP           // KCP ARQ protocol
 		l          *Listener      // point to the Listener if it's accepted by Listener
-		block      BlockCrypt     // block encryption
 
 		// kcp receiving is based on packets
 		// recvbuf turns packets into stream
@@ -113,7 +102,7 @@ type (
 )
 
 // newUDPSession create a new udp session for client or server
-func newUDPSession(conv uint32, dataShards, parityShards int, l *Listener, conn net.PacketConn, remote net.Addr, block BlockCrypt) *UDPSession {
+func newUDPSession(conv uint32, dataShards, parityShards int, l *Listener, conn net.PacketConn, remote net.Addr) *UDPSession {
 	sess := new(UDPSession)
 	sess.die = make(chan struct{})
 	sess.chReadEvent = make(chan struct{}, 1)
@@ -122,21 +111,12 @@ func newUDPSession(conv uint32, dataShards, parityShards int, l *Listener, conn 
 	sess.remote = remote
 	sess.conn = conn
 	sess.l = l
-	sess.block = block
 	sess.recvbuf = make([]byte, mtuLimit)
 
 	// FEC initialization
 	sess.fecDecoder = newFECDecoder(rxFECMulti*(dataShards+parityShards), dataShards, parityShards)
-	if sess.block != nil {
-		sess.fecEncoder = newFECEncoder(dataShards, parityShards, cryptHeaderSize)
-	} else {
-		sess.fecEncoder = newFECEncoder(dataShards, parityShards, 0)
-	}
+	sess.fecEncoder = newFECEncoder(dataShards, parityShards, 0)
 
-	// calculate header size
-	if sess.block != nil {
-		sess.headerSize += cryptHeaderSize
-	}
 	if sess.fecEncoder != nil {
 		sess.headerSize += fecHeaderSizePlus2
 	}
@@ -478,21 +458,6 @@ func (s *UDPSession) output(buf []byte) {
 		ecc = s.fecEncoder.encode(ext)
 	}
 
-	// 2&3. crc32 & encryption
-	if s.block != nil {
-		s.nonce.Fill(ext[:nonceSize])
-		checksum := crc32.ChecksumIEEE(ext[cryptHeaderSize:])
-		binary.LittleEndian.PutUint32(ext[nonceSize:], checksum)
-		s.block.Encrypt(ext, ext)
-
-		for k := range ecc {
-			s.nonce.Fill(ecc[k][:nonceSize])
-			checksum := crc32.ChecksumIEEE(ecc[k][cryptHeaderSize:])
-			binary.LittleEndian.PutUint32(ecc[k][nonceSize:], checksum)
-			s.block.Encrypt(ecc[k], ecc[k])
-		}
-	}
-
 	// 4. WriteTo kernel
 	nbytes := 0
 	npkts := 0
@@ -638,24 +603,7 @@ func (s *UDPSession) readLoop() {
 		select {
 		case data := <-chPacket:
 			raw := data
-			dataValid := false
-			if s.block != nil {
-				s.block.Decrypt(data, data)
-				data = data[nonceSize:]
-				checksum := crc32.ChecksumIEEE(data[crcSize:])
-				if checksum == binary.LittleEndian.Uint32(data) {
-					data = data[crcSize:]
-					dataValid = true
-				} else {
-					atomic.AddUint64(&DefaultSnmp.InCsumErrors, 1)
-				}
-			} else if s.block == nil {
-				dataValid = true
-			}
-
-			if dataValid {
-				s.kcpInput(data)
-			}
+			s.kcpInput(data)
 			xmitBuf.Put(raw)
 		case <-s.die:
 			return
@@ -671,7 +619,6 @@ type (
 
 	// Listener defines a server listening for connections
 	Listener struct {
-		block        BlockCrypt     // block encryption
 		dataShards   int            // FEC data shard
 		parityShards int            // FEC parity shard
 		fecDecoder   *fecDecoder    // FEC mock initialization
@@ -707,62 +654,46 @@ func (l *Listener) monitor() {
 			raw := p.data
 			data := p.data
 			from := p.from
-			dataValid := false
-			if l.block != nil {
-				l.block.Decrypt(data, data)
-				data = data[nonceSize:]
-				checksum := crc32.ChecksumIEEE(data[crcSize:])
-				if checksum == binary.LittleEndian.Uint32(data) {
-					data = data[crcSize:]
-					dataValid = true
-				} else {
-					atomic.AddUint64(&DefaultSnmp.InCsumErrors, 1)
-				}
-			} else if l.block == nil {
-				dataValid = true
-			}
 
-			if dataValid {
-				var conv uint32
-				convValid := false
-				if l.fecDecoder != nil {
-					isfec := binary.LittleEndian.Uint16(data[4:])
-					if isfec == typeData {
-						conv = binary.LittleEndian.Uint32(data[fecHeaderSizePlus2:])
-						convValid = true
-					}
-				} else {
-					conv = binary.LittleEndian.Uint32(data)
+			var conv uint32
+			convValid := false
+			if l.fecDecoder != nil {
+				isfec := binary.LittleEndian.Uint16(data[4:])
+				if isfec == typeData {
+					conv = binary.LittleEndian.Uint32(data[fecHeaderSizePlus2:])
 					convValid = true
 				}
+			} else {
+				conv = binary.LittleEndian.Uint32(data)
+				convValid = true
+			}
 
-				if convValid {
-					key := sessionKey{
-						addr:   from.String(),
-						convID: conv,
-					}
-					var s *UDPSession
-					var ok bool
+			if convValid {
+				key := sessionKey{
+					addr:   from.String(),
+					convID: conv,
+				}
+				var s *UDPSession
+				var ok bool
 
-					// packets received from an address always come in batch.
-					// cache the session for next packet, without querying map.
-					if key == lastKey {
-						s, ok = lastSession, true
-					} else if s, ok = l.sessions[key]; ok {
-						lastSession = s
-						lastKey = key
-					}
+				// packets received from an address always come in batch.
+				// cache the session for next packet, without querying map.
+				if key == lastKey {
+					s, ok = lastSession, true
+				} else if s, ok = l.sessions[key]; ok {
+					lastSession = s
+					lastKey = key
+				}
 
-					if !ok { // new session
-						if !blacklist.has(from.String(), conv) && len(l.chAccepts) < cap(l.chAccepts) && len(l.sessions) < 4096 { // do not let new session overwhelm accept queue and connection count
-							ses := newUDPSession(conv, l.dataShards, l.parityShards, l, l.conn, from, l.block)
-							ses.kcpInput(data)
-							l.sessions[key] = ses
-							l.chAccepts <- ses
-						}
-					} else {
-						s.kcpInput(data)
+				if !ok { // new session
+					if !blacklist.has(from.String(), conv) && len(l.chAccepts) < cap(l.chAccepts) && len(l.sessions) < 4096 { // do not let new session overwhelm accept queue and connection count
+						ses := newUDPSession(conv, l.dataShards, l.parityShards, l, l.conn, from)
+						ses.kcpInput(data)
+						l.sessions[key] = ses
+						l.chAccepts <- ses
 					}
+				} else {
+					s.kcpInput(data)
 				}
 			}
 
@@ -880,11 +811,11 @@ func (l *Listener) closeSession(key sessionKey) bool {
 func (l *Listener) Addr() net.Addr { return l.conn.LocalAddr() }
 
 // Listen listens for incoming KCP packets addressed to the local address laddr on the network "udp",
-func Listen(laddr string) (net.Listener, error) { return ListenWithOptions(laddr, nil, 0, 0) }
+func Listen(laddr string) (net.Listener, error) { return ListenWithOptions(laddr, 0, 0) }
 
 // ListenWithOptions listens for incoming KCP packets addressed to the local address laddr on the network "udp" with packet encryption,
 // dataShards, parityShards defines Reed-Solomon Erasure Coding parameters
-func ListenWithOptions(laddr string, block BlockCrypt, dataShards, parityShards int) (*Listener, error) {
+func ListenWithOptions(laddr string, dataShards, parityShards int) (*Listener, error) {
 	udpaddr, err := net.ResolveUDPAddr("udp", laddr)
 	if err != nil {
 		return nil, errors.Wrap(err, "net.ResolveUDPAddr")
@@ -894,11 +825,11 @@ func ListenWithOptions(laddr string, block BlockCrypt, dataShards, parityShards 
 		return nil, errors.Wrap(err, "net.ListenUDP")
 	}
 
-	return ServeConn(block, dataShards, parityShards, conn)
+	return ServeConn(dataShards, parityShards, conn)
 }
 
 // ServeConn serves KCP protocol for a single packet connection.
-func ServeConn(block BlockCrypt, dataShards, parityShards int, conn net.PacketConn) (*Listener, error) {
+func ServeConn(dataShards, parityShards int, conn net.PacketConn) (*Listener, error) {
 	l := new(Listener)
 	l.conn = conn
 	l.sessions = make(map[sessionKey]*UDPSession)
@@ -907,13 +838,8 @@ func ServeConn(block BlockCrypt, dataShards, parityShards int, conn net.PacketCo
 	l.die = make(chan struct{})
 	l.dataShards = dataShards
 	l.parityShards = parityShards
-	l.block = block
 	l.fecDecoder = newFECDecoder(rxFECMulti*(dataShards+parityShards), dataShards, parityShards)
 
-	// calculate header size
-	if l.block != nil {
-		l.headerSize += cryptHeaderSize
-	}
 	if l.fecDecoder != nil {
 		l.headerSize += fecHeaderSizePlus2
 	}
@@ -923,10 +849,10 @@ func ServeConn(block BlockCrypt, dataShards, parityShards int, conn net.PacketCo
 }
 
 // Dial connects to the remote address "raddr" on the network "udp"
-func Dial(raddr string) (net.Conn, error) { return DialWithOptions(raddr, nil, 0, 0) }
+func Dial(raddr string) (net.Conn, error) { return DialWithOptions(raddr, 0, 0) }
 
 // DialWithOptions connects to the remote address "raddr" on the network "udp" with packet encryption
-func DialWithOptions(raddr string, block BlockCrypt, dataShards, parityShards int) (*UDPSession, error) {
+func DialWithOptions(raddr string, dataShards, parityShards int) (*UDPSession, error) {
 	udpaddr, err := net.ResolveUDPAddr("udp", raddr)
 	if err != nil {
 		return nil, errors.Wrap(err, "net.ResolveUDPAddr")
@@ -937,11 +863,11 @@ func DialWithOptions(raddr string, block BlockCrypt, dataShards, parityShards in
 		return nil, errors.Wrap(err, "net.DialUDP")
 	}
 
-	return NewConn(raddr, block, dataShards, parityShards, &connectedUDPConn{udpconn})
+	return NewConn(raddr, dataShards, parityShards, &connectedUDPConn{udpconn})
 }
 
 // NewConn establishes a session and talks KCP protocol over a packet connection.
-func NewConn(raddr string, block BlockCrypt, dataShards, parityShards int, conn net.PacketConn) (*UDPSession, error) {
+func NewConn(raddr string, dataShards, parityShards int, conn net.PacketConn) (*UDPSession, error) {
 	udpaddr, err := net.ResolveUDPAddr("udp", raddr)
 	if err != nil {
 		return nil, errors.Wrap(err, "net.ResolveUDPAddr")
@@ -949,7 +875,7 @@ func NewConn(raddr string, block BlockCrypt, dataShards, parityShards int, conn 
 
 	var convid uint32
 	binary.Read(rand.Reader, binary.LittleEndian, &convid)
-	return newUDPSession(convid, dataShards, parityShards, nil, conn, udpaddr, block), nil
+	return newUDPSession(convid, dataShards, parityShards, nil, conn, udpaddr), nil
 }
 
 // returns current time in milliseconds

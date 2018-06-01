@@ -37,12 +37,7 @@ func init() {
 }
 
 func dialEcho() (*UDPSession, error) {
-	//block, _ := NewNoneBlockCrypt(pass)
-	//block, _ := NewSimpleXORBlockCrypt(pass)
-	//block, _ := NewTEABlockCrypt(pass[:16])
-	//block, _ := NewAESBlockCrypt(pass)
-	block, _ := NewSalsa20BlockCrypt(pass)
-	sess, err := DialWithOptions(portEcho, block, 10, 3)
+	sess, err := DialWithOptions(portEcho, 10, 3)
 	if err != nil {
 		panic(err)
 	}
@@ -64,7 +59,7 @@ func dialEcho() (*UDPSession, error) {
 }
 
 func dialSink() (*UDPSession, error) {
-	sess, err := DialWithOptions(portSink, nil, 0, 0)
+	sess, err := DialWithOptions(portSink, 0, 0)
 	if err != nil {
 		panic(err)
 	}
@@ -82,12 +77,7 @@ func dialSink() (*UDPSession, error) {
 }
 
 func dialTinyBufferEcho() (*UDPSession, error) {
-	//block, _ := NewNoneBlockCrypt(pass)
-	//block, _ := NewSimpleXORBlockCrypt(pass)
-	//block, _ := NewTEABlockCrypt(pass[:16])
-	//block, _ := NewAESBlockCrypt(pass)
-	block, _ := NewSalsa20BlockCrypt(pass)
-	sess, err := DialWithOptions(portTinyBufferEcho, block, 10, 3)
+	sess, err := DialWithOptions(portTinyBufferEcho, 10, 3)
 	if err != nil {
 		panic(err)
 	}
@@ -96,24 +86,14 @@ func dialTinyBufferEcho() (*UDPSession, error) {
 
 //////////////////////////
 func listenEcho() (net.Listener, error) {
-	//block, _ := NewNoneBlockCrypt(pass)
-	//block, _ := NewSimpleXORBlockCrypt(pass)
-	//block, _ := NewTEABlockCrypt(pass[:16])
-	//block, _ := NewAESBlockCrypt(pass)
-	block, _ := NewSalsa20BlockCrypt(pass)
-	return ListenWithOptions(portEcho, block, 10, 3)
+	return ListenWithOptions(portEcho, 10, 3)
 }
 func listenTinyBufferEcho() (net.Listener, error) {
-	//block, _ := NewNoneBlockCrypt(pass)
-	//block, _ := NewSimpleXORBlockCrypt(pass)
-	//block, _ := NewTEABlockCrypt(pass[:16])
-	//block, _ := NewAESBlockCrypt(pass)
-	block, _ := NewSalsa20BlockCrypt(pass)
-	return ListenWithOptions(portTinyBufferEcho, block, 10, 3)
+	return ListenWithOptions(portTinyBufferEcho, 10, 3)
 }
 
 func listenSink() (net.Listener, error) {
-	return ListenWithOptions(portSink, nil, 0, 0)
+	return ListenWithOptions(portSink, 0, 0)
 }
 
 func echoServer() {
@@ -456,7 +436,7 @@ func TestSNMP(t *testing.T) {
 }
 
 func TestListenerClose(t *testing.T) {
-	l, err := ListenWithOptions(portListerner, nil, 10, 3)
+	l, err := ListenWithOptions(portListerner, 10, 3)
 	if err != nil {
 		t.Fail()
 	}
