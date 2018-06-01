@@ -67,7 +67,6 @@ type (
 		remote     net.Addr  // remote peer address
 		rd         time.Time // read deadline
 		wd         time.Time // write deadline
-		headerSize int       // the overall header size added before KCP frame
 		ackNoDelay bool      // send ack immediately for each incoming packet
 		writeDelay bool      // delay kcp.flush() for Write() for bulk transfer
 		dup        int       // duplicate udp packets
@@ -103,18 +102,12 @@ func newUDPSession(conv uint32, l *Listener, conn net.PacketConn, remote net.Add
 	sess.l = l
 	sess.recvbuf = make([]byte, mtuLimit)
 
-	// only allocate extended packet buffer
-	// when the extra header is required
-	if sess.headerSize > 0 {
-		sess.ext = make([]byte, mtuLimit)
-	}
-
 	sess.kcp = NewKCP(conv, func(buf []byte, size int) {
 		if size >= IKCP_OVERHEAD {
 			sess.output(buf[:size])
 		}
 	})
-	sess.kcp.SetMtu(IKCP_MTU_DEF - sess.headerSize)
+	sess.kcp.SetMtu(IKCP_MTU_DEF)
 	blacklist.add(remote.String(), conv)
 
 	// add current session to the global updater,
@@ -343,7 +336,7 @@ func (s *UDPSession) SetMtu(mtu int) bool {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.kcp.SetMtu(mtu - s.headerSize)
+	s.kcp.SetMtu(mtu)
 	return true
 }
 
@@ -421,24 +414,13 @@ func (s *UDPSession) SetWriteBuffer(bytes int) error {
 // output pipeline entry
 // steps for output data processing:
 // 0. Header extends
-// 1. FEC
-// 2. CRC32
-// 3. Encryption
 // 4. WriteTo kernel
 func (s *UDPSession) output(buf []byte) {
 
-	// 0. extend buf's header space(if necessary)
-	ext := buf
-	if s.headerSize > 0 {
-		ext = s.ext[:s.headerSize+len(buf)]
-		copy(ext[s.headerSize:], buf)
-	}
-
-	// 4. WriteTo kernel
 	nbytes := 0
 	npkts := 0
 	for i := 0; i < s.dup+1; i++ {
-		if n, err := s.conn.WriteTo(ext, s.remote); err == nil {
+		if n, err := s.conn.WriteTo(buf, s.remote); err == nil {
 			nbytes += n
 			npkts++
 		}
@@ -510,7 +492,7 @@ func (s *UDPSession) kcpInput(data []byte) {
 func (s *UDPSession) receiver(ch chan<- []byte) {
 	for {
 		data := xmitBuf.Get().([]byte)[:mtuLimit]
-		if n, _, err := s.conn.ReadFrom(data); err == nil && n >= s.headerSize+IKCP_OVERHEAD {
+		if n, _, err := s.conn.ReadFrom(data); err == nil && n >= IKCP_OVERHEAD {
 			select {
 			case ch <- data[:n]:
 			case <-s.die:
