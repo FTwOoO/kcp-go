@@ -403,9 +403,17 @@ func (s *UDPSession) output(buf []byte) {
 	nbytes := 0
 	npkts := 0
 	for i := 0; i < s.dup+1; i++ {
-		if n, err := s.conn.WriteTo(buf, s.remote); err == nil {
-			nbytes += n
-			npkts++
+
+		if s.l == nil {
+			if n, err := s.conn.(*net.UDPConn).Write(buf); err == nil {
+				nbytes += n
+				npkts++
+			}
+		} else {
+			if n, err := s.conn.WriteTo(buf, s.remote); err == nil {
+				nbytes += n
+				npkts++
+			}
 		}
 	}
 
